@@ -1,67 +1,85 @@
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
-abstract class TokenStore {
-  Future<void> saveTokens(String access, String refresh);
-  Future<String?> getAccessToken();
-  Future<String?> getRefreshToken();
-  Future<void> clear();
-}
+class TokenStore {
+  final FlutterSecureStorage storage;
 
-class MobileTokenStore implements TokenStore {
-  static const _access = 'access_token';
-  static const _refresh = 'refresh_token';
-  final _storage = const FlutterSecureStorage();
+  const TokenStore(this.storage);
 
-  @override
-  Future<void> saveTokens(String access, String refresh) async {
-    await _storage.write(key: _access, value: access);
-    await _storage.write(key: _refresh, value: refresh);
+  // =========================
+  // Keys (todas juntas arriba)
+  // =========================
+  static const _kAccessToken = 'access_token';
+  static const _kRefreshToken = 'refresh_token';
+
+  // 👉 NUEVAS keys para sesión offline
+  static const _kOfflineUntil = 'offline_session_until';
+  static const _kUserId = 'user_id';
+
+  // =========================
+  // Tokens JWT
+  // =========================
+  Future<void> saveTokens({
+    required String access,
+    required String refresh,
+  }) async {
+    await storage.write(key: _kAccessToken, value: access);
+    await storage.write(key: _kRefreshToken, value: refresh);
   }
 
-  @override
-  Future<String?> getAccessToken() => _storage.read(key: _access);
-
-  @override
-  Future<String?> getRefreshToken() => _storage.read(key: _refresh);
-
-  @override
-  Future<void> clear() async {
-    await _storage.delete(key: _access);
-    await _storage.delete(key: _refresh);
-  }
-}
-
-class WebTokenStore implements TokenStore {
-  static const _access = 'access_token';
-  static const _refresh = 'refresh_token';
-
-  @override
-  Future<void> saveTokens(String access, String refresh) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_access, access);
-    await prefs.setString(_refresh, refresh);
-  }
-
-  @override
   Future<String?> getAccessToken() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_access);
+    return storage.read(key: _kAccessToken);
   }
 
-  @override
   Future<String?> getRefreshToken() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_refresh);
+    return storage.read(key: _kRefreshToken);
   }
 
-  @override
+  // =========================
+  // Sesión OFFLINE (login persistente)
+  // =========================
+
+  /// Guarda hasta cuándo es válida la sesión offline
+  Future<void> saveOfflineSessionUntil(DateTime until) async {
+    await storage.write(
+      key: _kOfflineUntil,
+      value: until.toIso8601String(),
+    );
+  }
+
+  /// Obtiene la fecha de expiración de la sesión offline
+  Future<DateTime?> getOfflineSessionUntil() async {
+    final value = await storage.read(key: _kOfflineUntil);
+    if (value == null) return null;
+    return DateTime.tryParse(value);
+  }
+
+  /// Indica si la sesión offline sigue siendo válida
+  Future<bool> hasValidOfflineSession() async {
+    final until = await getOfflineSessionUntil();
+    if (until == null) return false;
+    return DateTime.now().isBefore(until);
+  }
+
+  // =========================
+  // Usuario
+  // =========================
+  Future<void> saveUserId(int userId) async {
+    await storage.write(key: _kUserId, value: userId.toString());
+  }
+
+  Future<int?> getUserId() async {
+    final value = await storage.read(key: _kUserId);
+    if (value == null) return null;
+    return int.tryParse(value);
+  }
+
+  // =========================
+  // Limpieza total (logout)
+  // =========================
   Future<void> clear() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_access);
-    await prefs.remove(_refresh);
+    await storage.delete(key: _kAccessToken);
+    await storage.delete(key: _kRefreshToken);
+    await storage.delete(key: _kOfflineUntil);
+    await storage.delete(key: _kUserId);
   }
 }
-
-TokenStore createTokenStore() => kIsWeb ? WebTokenStore() : MobileTokenStore();

@@ -1,0 +1,3 @@
+class CatalogosRemoteDS {
+  // TODO: endpoints -> /catalogos/lotes, /catalogos/campanias...
+}

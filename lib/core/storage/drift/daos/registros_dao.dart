@@ -1,0 +1,203 @@
+import 'dart:convert';
+import 'package:drift/drift.dart';
+import 'package:flutter/cupertino.dart';
+
+import '../app_database.dart';
+import '../tables/registros_table.dart';
+import '../../../sync/sync_models.dart';
+import '../../../../features/registros/domain/registro.dart';
+
+part 'registros_dao.g.dart';
+
+@DriftAccessor(tables: [RegistrosLocal])
+class RegistrosDao extends DatabaseAccessor<AppDatabase> with _$RegistrosDaoMixin {
+  RegistrosDao(super.db);
+
+  Stream<List<Registro>> watchByPlantilla(int plantillaId) {
+    final q = (select(registrosLocal)
+      ..where((t) => t.plantillaId.equals(plantillaId))
+      ..orderBy([(t) => OrderingTerm.desc(t.updatedAt)]));
+    return q.watch().map(_mapRows);
+  }
+
+  Future<int> insertDraft({
+    required int plantillaId,
+    required String templateKey,
+    required int userId,
+  }) {
+    final now = DateTime.now();
+    return into(registrosLocal).insert(
+      RegistrosLocalCompanion.insert(
+        plantillaId: plantillaId,
+        templateKey: Value(templateKey),
+        userId: userId,
+        createdAt: now,
+        updatedAt: now,
+        dataJson: const Value('{}'),
+        estado: const Value('borrador'),
+        syncStatus: const Value('local'),
+      ),
+    );
+  }
+
+
+  Future<Registro> getByLocalId(int localId) async {
+    final row = await (select(registrosLocal)..where((t) => t.localId.equals(localId))).getSingle();
+    return _mapRow(row);
+  }
+
+  Future<void> updateRegistro({
+    required int localId,
+    required Map<String, dynamic> dataJson,
+    required EstadoRegistro estado,
+    required SyncStatus syncStatus,
+    String? campaniaId,
+    int? loteId,
+    double? lat,
+    double? lon,
+  }) async {
+    await (update(registrosLocal)..where((t) => t.localId.equals(localId))).write(
+      RegistrosLocalCompanion(
+        dataJson: Value(jsonEncode(dataJson)),
+        estado: Value(estado.name),
+        syncStatus: Value(syncStatus.name),
+
+        campaniaId: Value(campaniaId),
+        loteId: Value(loteId),
+        lat: Value(lat),
+        lon: Value(lon),
+      ),
+    );
+
+    debugPrint('DAO.updateRegistro localId=$localId dataJsonLen=${jsonEncode(dataJson).length}');
+
+  }
+
+
+  /* Future<void> updateRegistro({
+    required int localId,
+    required Map<String, dynamic> dataJson,
+    required EstadoRegistro estado,
+    required SyncStatus syncStatus,
+  }) async {
+    final now = DateTime.now();
+    await (update(registrosLocal)..where((t) => t.localId.equals(localId))).write(
+      RegistrosLocalCompanion(
+        dataJson: Value(jsonEncode(dataJson)),
+        estado: Value(estadoToDb(estado)),
+        syncStatus: Value(syncStatusToDb(syncStatus)),
+        updatedAt: Value(now),
+      ),
+    );
+  }*/
+
+  Future<List<Registro>> listPending({int? plantillaId}) async {
+    final q = select(registrosLocal)
+      ..where((t) => t.syncStatus.equals('pending'));
+
+    if (plantillaId != null) {
+      q.where((t) => t.plantillaId.equals(plantillaId));
+    }
+
+    q.orderBy([(t) => OrderingTerm.asc(t.updatedAt)]);
+
+    final rows = await q.get();
+    return _mapRows(rows);
+  }
+
+  Future<List<RegistrosLocalData>> listSyncQueue({int? plantillaId}) {
+    final q = select(registrosLocal)
+      ..where((t) =>
+      t.estado.equals('listo') &
+      (t.syncStatus.equals('pending') | t.syncStatus.equals('failed')));
+
+    if (plantillaId != null) {
+      q.where((t) => t.plantillaId.equals(plantillaId));
+    }
+
+    q.orderBy([(t) => OrderingTerm.asc(t.updatedAt)]);
+    return q.get();
+  }
+
+
+  Future<int> updateDataJson({
+    required int localId,
+    required String dataJson,
+  }) {
+    return (update(registrosLocal)
+      ..where((t) => t.localId.equals(localId)))
+        .write(RegistrosLocalCompanion(
+      dataJson: Value(dataJson),
+      updatedAt: Value(DateTime.now()),
+      // opcional: al editar, márcalo pendiente de sync
+      syncStatus: const Value('pending'),
+    ));
+  }
+
+  Future<int> markAsReadyForSync({required int localId}) {
+    return (update(registrosLocal)
+      ..where((t) => t.localId.equals(localId)))
+        .write(
+      RegistrosLocalCompanion(
+        estado: const Value('listo'),
+        syncStatus: const Value('pending'),
+        updatedAt: Value(DateTime.now()),
+      ),
+    );
+  }
+
+
+
+  Future<void> markSynced(int localId, int serverId) async {
+    await (update(registrosLocal)..where((t) => t.localId.equals(localId))).write(
+      RegistrosLocalCompanion(
+        serverId: Value(serverId),
+        syncStatus: const Value('synced'),
+        syncError: const Value(null),
+      ),
+    );
+  }
+
+  Future<void> markFailed(int localId, String error) async {
+    final now = DateTime.now();
+    await (update(registrosLocal)..where((t) => t.localId.equals(localId))).write(
+      RegistrosLocalCompanion(
+        syncStatus: const Value('failed'),
+        syncError: Value(error),
+        syncAttempts: const Value.absent(), // lo incrementamos abajo
+        updatedAt: Value(now),
+      ),
+    );
+
+    // incrementar intentos (simple y claro)
+    await customUpdate(
+      'UPDATE registros_local SET sync_attempts = sync_attempts + 1 WHERE local_id = ?',
+      variables: [Variable<int>(localId)],
+      updates: {registrosLocal},
+    );
+  }
+
+  List<Registro> _mapRows(List<RegistrosLocalData> rows) => rows.map(_mapRow).toList();
+
+  Registro _mapRow(RegistrosLocalData r) {
+    return Registro(
+      localId: r.localId,
+      serverId: r.serverId,
+      plantillaId: r.plantillaId,
+      templateKey: r.templateKey,
+      userId: r.userId,
+      campaniaId: r.campaniaId,
+      loteId: r.loteId,
+      lat: r.lat,
+      lon: r.lon,
+      estado: estadoFromDb(r.estado),
+      syncStatus: syncStatusFromDb(r.syncStatus),
+      syncError: r.syncError,
+      syncAttempts: r.syncAttempts,
+      dataJson: r.dataJson,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt,
+      deletedAt: r.deletedAt,
+    );
+  }
+}
